@@ -1,4 +1,5 @@
-import { extension_settings, renderExtensionTemplateAsync, saveSettingsDebounced } from '../../../extensions.js';
+import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
+import { saveSettingsDebounced } from '../../../../script.js';
 import { translate } from '../../../i18n.js';
 
 const MODULE_NAME = (() => {
@@ -32,7 +33,7 @@ function getSettings() {
 }
 
 function persistSettings() {
-    saveSettingsDebounced(MODULE_NAME);
+    saveSettingsDebounced();
 }
 
 function readFailureMessage(response) {
