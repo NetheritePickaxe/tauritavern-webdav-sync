@@ -1,0 +1,10 @@
+{
+    "display_name": "WebDAV Sync",
+    "loading_order": 25,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "author": "tauritavern-webdav-sync",
+    "version": "1.0.0",
+    "homePage": "https://github.com/tauritavern-webdav-sync"
+}
