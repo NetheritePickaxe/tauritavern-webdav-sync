@@ -1,6 +1,7 @@
 import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 import { translate } from '../../../i18n.js';
+import { eventSource, event_types } from '../../../../script.js';
 
 const MODULE_NAME = (() => {
     const match = import.meta.url.match(/\/scripts\/extensions\/(third-party\/[^/]+)\//);
@@ -10,7 +11,10 @@ const MODULE_NAME = (() => {
 const SECRET_KEY = 'webdav_sync_password';
 const JOB_POLL_INTERVAL_MS = 1200;
 const TERMINAL_JOB_STATES = new Set(['completed', 'failed', 'cancelled']);
+const AUTO_PUSH_DEBOUNCE_MS = 5000;
 const DEFAULT_FILENAME = 'tauritavern-backup.zip';
+const DEFAULT_USER_HANDLE = 'default-user';
+const DEFAULT_SYNC_INTERVAL_MINUTES = 30;
 
 function localize(key, fallback) {
     return translate(fallback, key);
@@ -25,8 +29,10 @@ const jobState = {
     jobId: '',
     starting: false,
     cancelRequested: false,
-    lastExportSavedPath: '',
 };
+
+let autoPushPending = false;
+let autoPushTimerId = null;
 
 function getSettings() {
     return (extension_settings.webdav_sync ??= {});
@@ -243,23 +249,6 @@ async function pollUntilTerminal(jobId) {
     }
 }
 
-async function saveExportArchive(jobId) {
-    const response = await fetch('/api/extensions/data-migration/export/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId }),
-    });
-    if (!response.ok) {
-        throw new Error(await readFailureMessage(response));
-    }
-
-    const payload = await response.json();
-    return {
-        savedPath: String(payload?.saved_target || ''),
-        cleanupError: payload?.cleanup_error ? String(payload.cleanup_error) : null,
-    };
-}
-
 async function startImportJobFromBlob(blob, filename) {
     const formData = new FormData();
     formData.append('archive', blob, filename);
@@ -306,30 +295,17 @@ async function requestCancelActiveJob() {
     }
 }
 
-function onSaveClick() {
-    try {
-        const credentials = readCredentials();
-        const settings = getSettings();
-        settings.url = credentials.url;
-        settings.username = credentials.username;
-        settings.filename = credentials.filename;
-        persistSettings();
-
-        const password = String($('#webdav_sync_password_input').val() || '');
-        if (password) {
-            writeSecret(SECRET_KEY, password)
-                .then(() => {
-                    toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
-                })
-                .catch((error) => {
-                    toastr.error(normalizeCaughtError(error), localize('webdav_sync.password_save_failed', 'Failed to save password'));
-                });
-        } else {
-            toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
-        }
-    } catch (error) {
-        toastr.error(normalizeCaughtError(error), localize('webdav_sync.settings_save_failed', 'Failed to save settings'));
+async function exportUserBackupArchive() {
+    const handle = String(getSettings().userHandle || DEFAULT_USER_HANDLE).trim() || DEFAULT_USER_HANDLE;
+    const response = await fetch('/api/users/backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handle }),
+    });
+    if (!response.ok) {
+        throw new Error(await readFailureMessage(response));
     }
+    return response.blob();
 }
 
 async function uploadFileToWebdav(file) {
@@ -338,7 +314,7 @@ async function uploadFileToWebdav(file) {
         credentials = readCredentials();
     } catch (error) {
         toastr.error(normalizeCaughtError(error), localize('webdav_sync.upload_failed', 'Upload failed'));
-        return;
+        return null;
     }
 
     const targetUrl = buildTargetUrl(credentials);
@@ -362,21 +338,27 @@ async function uploadFileToWebdav(file) {
         const localizedMsg = localizeTemplate('webdav_sync.uploaded', 'Backup uploaded: ${0}', targetUrl);
         toastr.success(localizedMsg, localize('webdav_sync.push_completed', 'Push completed'), { timeOut: 8000 });
         setStatusText(localize('webdav_sync.upload_completed', 'Upload completed'));
+        return true;
     } catch (error) {
         const failureMessage = normalizeCaughtError(error);
         toastr.error(failureMessage, localize('webdav_sync.upload_failed', 'Upload failed'));
         setStatusText(failureMessage);
+        return false;
     }
 }
 
-function onUploadInputChange(event) {
-    const input = event.currentTarget;
-    const file = input?.files?.[0];
-    input.value = '';
-
-    if (file) {
-        uploadFileToWebdav(file);
+async function runExportAndUpload() {
+    let blob;
+    try {
+        blob = await exportUserBackupArchive();
+    } catch (error) {
+        const failureMessage = normalizeCaughtError(error);
+        toastr.error(failureMessage, localize('webdav_sync.export_failed', 'Export failed'));
+        setStatusText(failureMessage);
+        return false;
     }
+
+    return uploadFileToWebdav(blob);
 }
 
 async function runPush() {
@@ -387,33 +369,15 @@ async function runPush() {
 
     markJobStarting();
     try {
-        const jobId = await startExportJob();
-        startJobTracking(jobId);
-
-        const finalStatus = await pollUntilTerminal(jobId);
-        if (finalStatus.state !== 'completed') {
-            throw new Error(normalizeCaughtError(finalStatus.error || new Error('Export failed')));
+        const success = await runExportAndUpload();
+        if (success) {
+            const now = new Date().toLocaleString();
+            const settings = getSettings();
+            settings.lastAutoSyncTime = now;
+            persistSettings();
+            setStatusText(localizeTemplate('webdav_sync.synced_at', 'Last sync: ${0}', now));
         }
-
-        const saveResult = await saveExportArchive(jobId);
-        if (saveResult.cleanupError) {
-            toastr.warning(saveResult.cleanupError, localize('webdav_sync.export_cleanup_failed', 'Export cleanup failed'));
-        }
-
-        const savedPath = saveResult.savedPath;
-        jobState.lastExportSavedPath = savedPath;
         stopJobTracking();
-
-        if (savedPath) {
-            const localizedPrompt = localizeTemplate('webdav_sync.export_saved_prompt', 'Export saved: ${0}. Select this file in the picker to finish the upload.', savedPath);
-            setStatusText(localizeTemplate('webdav_sync.export_saved_status', 'Export saved: ${0}', savedPath));
-            toastr.success(localizedPrompt, localize('webdav_sync.push_title', 'Push to WebDAV'), { timeOut: 9000 });
-        } else {
-            setStatusText(localize('webdav_sync.export_saved', 'Export saved'));
-            toastr.success(localize('webdav_sync.select_exported', 'Select the exported zip file to finish the upload.'), localize('webdav_sync.push_title', 'Push to WebDAV'), { timeOut: 9000 });
-        }
-
-        $('#webdav_sync_upload_input').trigger('click');
     } catch (error) {
         const failureMessage = normalizeCaughtError(error);
         toastr.error(failureMessage, localize('webdav_sync.push_failed', 'Push failed'));
@@ -475,6 +439,87 @@ async function runPull() {
     }
 }
 
+function triggerAutoPush() {
+    const settings = getSettings();
+    if (!settings.autoPushEnabled) {
+        return;
+    }
+    if (!settings.url) {
+        setStatusText(localize('webdav_sync.auto_push_no_settings', 'Auto-push enabled but no settings configured'));
+        return;
+    }
+    if (hasActiveJob() || autoPushPending) {
+        return;
+    }
+
+    autoPushPending = true;
+    runExportAndUpload()
+        .finally(() => {
+            autoPushPending = false;
+        });
+}
+
+function scheduleAutoPush() {
+    const settings = getSettings();
+    if (autoPushTimerId !== null) {
+        clearInterval(autoPushTimerId);
+        autoPushTimerId = null;
+    }
+
+    if (!settings.autoPushEnabled || !settings.url) {
+        return;
+    }
+
+    autoPushTimerId = setInterval(() => {
+        if (!autoPushPending && !hasActiveJob()) {
+            triggerAutoPush();
+        }
+    }, (Number(settings.syncIntervalMinutes) || DEFAULT_SYNC_INTERVAL_MINUTES) * 60 * 1000);
+}
+
+function onEventDebounced() {
+    if (autoPushPending) {
+        return;
+    }
+    autoPushPending = true;
+    setTimeout(() => {
+        autoPushPending = false;
+        triggerAutoPush();
+    }, AUTO_PUSH_DEBOUNCE_MS);
+}
+
+function onSaveClick() {
+    try {
+        const credentials = readCredentials();
+        const settings = getSettings();
+        settings.url = credentials.url;
+        settings.username = credentials.username;
+        settings.filename = credentials.filename;
+        settings.userHandle = String($('#webdav_sync_user_handle_input').val() || '').trim() || DEFAULT_USER_HANDLE;
+        settings.syncIntervalMinutes = Number($('#webdav_sync_interval_input').val()) || DEFAULT_SYNC_INTERVAL_MINUTES;
+        settings.autoPushEnabled = $('#webdav_sync_auto_push_toggle').is(':checked');
+        settings.autoPullEnabled = $('#webdav_sync_auto_pull_toggle').is(':checked');
+        persistSettings();
+
+        const password = String($('#webdav_sync_password_input').val() || '');
+        if (password) {
+            writeSecret(SECRET_KEY, password)
+                .then(() => {
+                    toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
+                })
+                .catch((error) => {
+                    toastr.error(normalizeCaughtError(error), localize('webdav_sync.password_save_failed', 'Failed to save password'));
+                });
+        } else {
+            toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
+        }
+
+        scheduleAutoPush();
+    } catch (error) {
+        toastr.error(normalizeCaughtError(error), localize('webdav_sync.settings_save_failed', 'Failed to save settings'));
+    }
+}
+
 jQuery(async () => {
     const html = await renderExtensionTemplateAsync(MODULE_NAME, 'settings');
     $('#extensions_settings2').append(html);
@@ -483,6 +528,10 @@ jQuery(async () => {
     $('#webdav_sync_url_input').val(settings.url || '');
     $('#webdav_sync_username_input').val(settings.username || '');
     $('#webdav_sync_filename_input').val(settings.filename || DEFAULT_FILENAME);
+    $('#webdav_sync_user_handle_input').val(settings.userHandle || DEFAULT_USER_HANDLE);
+    $('#webdav_sync_interval_input').val(settings.syncIntervalMinutes || DEFAULT_SYNC_INTERVAL_MINUTES);
+    $('#webdav_sync_auto_push_toggle').prop('checked', Boolean(settings.autoPushEnabled));
+    $('#webdav_sync_auto_pull_toggle').prop('checked', Boolean(settings.autoPullEnabled));
 
     const storedPassword = await findSecret(SECRET_KEY);
     if (storedPassword) {
@@ -490,11 +539,31 @@ jQuery(async () => {
     }
 
     refreshControls();
-    setStatusText(localize('webdav_sync.ready', 'Ready'));
+    setStatusText(settings.lastAutoSyncTime
+        ? localizeTemplate('webdav_sync.synced_at', 'Last sync: ${0}', settings.lastAutoSyncTime)
+        : localize('webdav_sync.ready', 'Ready')
+    );
 
     $('#webdav_sync_save_button').on('click', onSaveClick);
     $('#webdav_sync_push_button').on('click', runPush);
     $('#webdav_sync_pull_button').on('click', runPull);
     $('#webdav_sync_cancel_button').on('click', requestCancelActiveJob);
-    $('#webdav_sync_upload_input').on('change', onUploadInputChange);
+
+    eventSource.on(event_types.CHAT_CHANGED, onEventDebounced);
+    eventSource.on(event_types.MESSAGE_SENT, onEventDebounced);
+    eventSource.on(event_types.USER_MESSAGE_RENDERED, onEventDebounced);
+    eventSource.on(event_types.MESSAGE_EDITED, onEventDebounced);
+    eventSource.on(event_types.MESSAGE_DELETED, onEventDebounced);
+    eventSource.on(event_types.CHARACTER_DELETED, onEventDebounced);
+    eventSource.on(event_types.WORLDINFO_FORCE_ACTIVATE, onEventDebounced);
+
+    scheduleAutoPush();
+
+    if (settings.autoPushEnabled && settings.url) {
+        if (hasActiveJob() || autoPushPending) {
+            setStatusText(localize('webdav_sync.auto_push_running', 'Auto-push is currently running'));
+        } else {
+            triggerAutoPush();
+        }
+    }
 });

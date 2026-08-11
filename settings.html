@@ -32,6 +32,40 @@
                     value="tauritavern-backup.zip"
                     data-i18n="[title]webdav_sync.filename_title"
                     title="Remote file name used on the WebDAV server" />
+                <input id="webdav_sync_user_handle_input" class="text_pole" type="text"
+                    data-i18n="[placeholder]webdav_sync.user_handle_placeholder"
+                    value="default-user"
+                    data-i18n="[title]webdav_sync.user_handle_title"
+                    title="TauriTavern user handle to back up" />
+            </div>
+
+            <div class="flex-container flexGap5" style="margin-bottom: 8px;">
+                <input id="webdav_sync_interval_input" class="text_pole" type="number" min="1" max="1440"
+                    data-i18n="[placeholder]webdav_sync.interval_placeholder"
+                    value="30"
+                    data-i18n="[title]webdav_sync.interval_title"
+                    title="Periodic auto-push interval in minutes" />
+                <small class="extensions_info" data-i18n="webdav_sync.interval_unit">minutes</small>
+            </div>
+
+            <div style="margin-bottom: 8px;">
+                <label>
+                    <input id="webdav_sync_auto_push_toggle" type="checkbox" />
+                    <span data-i18n="webdav_sync.auto_push_label">Auto-push on chat changes</span>
+                </label>
+                <small class="extensions_info" style="margin-left:8px;" data-i18n="webdav_sync.auto_push_hint">
+                    Pushes automatically after messages, character changes, or every N minutes.
+                </small>
+            </div>
+
+            <div style="margin-bottom: 8px;">
+                <label>
+                    <input id="webdav_sync_auto_pull_toggle" type="checkbox" />
+                    <span data-i18n="webdav_sync.auto_pull_label">Auto-pull from WebDAV</span>
+                </label>
+                <small class="extensions_info" style="margin-left:8px;" data-i18n="webdav_sync.auto_pull_hint">
+                    Periodically pulls and merges remote backup into local data (will overwrite same-path files).
+                </small>
             </div>
 
             <div class="flex-container flexGap5">
@@ -54,14 +88,10 @@
                 </button>
             </div>
 
-            <input id="webdav_sync_upload_input" type="file" accept=".zip,application/zip,application/octet-stream"
-                hidden />
-
             <small id="webdav_sync_status" class="extensions_info"></small>
 
             <small class="extensions_info" data-i18n="webdav_sync.push_hint">
-                Push exports your data to a zip archive, then uploads it to the WebDAV server. Because the exported
-                archive is written to your Downloads folder, select that file in the picker to finish the upload.
+                Push exports your data to a zip archive and uploads it directly to the WebDAV server. No local file is kept.
             </small>
             <small class="extensions_info" data-i18n="webdav_sync.warning_merge">
                 Warning: pulling will merge into your current local data directory (same-path files will be overwritten).
