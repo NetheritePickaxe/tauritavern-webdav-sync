@@ -1,48 +1,56 @@
 <div id="webdav_sync_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>WebDAV Sync</b>
+            <b data-i18n="webdav_sync.panel_title">WebDAV Sync</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <small class="extensions_info">
+            <small class="extensions_info"
+                data-i18n="webdav_sync.panel_description">
                 Sync your TauriTavern data directory to any WebDAV server (r2-webdav, Nextcloud, ownCloud, ...).
             </small>
 
             <div class="flex-container flexGap5" style="margin-bottom: 8px;">
                 <input id="webdav_sync_url_input" class="text_pole" type="text"
+                    data-i18n="[placeholder]webdav_sync.url_placeholder"
                     placeholder="https://dav.example.com/tauritavern/"
+                    data-i18n="[title]webdav_sync.url_title"
                     title="WebDAV target directory URL, must end with /" />
                 <input id="webdav_sync_username_input" class="text_pole" type="text"
-                    placeholder="Username" autocomplete="username" />
+                    data-i18n="[placeholder]webdav_sync.username_placeholder"
+                    placeholder="Username"
+                    autocomplete="username" />
                 <input id="webdav_sync_password_input" class="text_pole" type="password"
-                    placeholder="Password (stored as a secret)" autocomplete="current-password" />
+                    data-i18n="[placeholder]webdav_sync.password_placeholder"
+                    placeholder="Password (stored as a secret)"
+                    autocomplete="current-password" />
             </div>
 
             <div class="flex-container flexGap5" style="margin-bottom: 8px;">
                 <input id="webdav_sync_filename_input" class="text_pole" type="text"
+                    data-i18n="[placeholder]webdav_sync.filename_placeholder"
                     value="tauritavern-backup.zip"
-                    placeholder="Remote file name"
-                    title="File name used on the WebDAV server" />
+                    data-i18n="[title]webdav_sync.filename_title"
+                    title="Remote file name used on the WebDAV server" />
             </div>
 
             <div class="flex-container flexGap5">
                 <button id="webdav_sync_save_button" class="menu_button menu_button_icon">
                     <i class="fa-solid fa-floppy-disk"></i>
-                    <span>Save Settings</span>
+                    <span data-i18n="webdav_sync.save_button">Save Settings</span>
                 </button>
                 <button id="webdav_sync_push_button" class="menu_button menu_button_icon">
                     <i class="fa-solid fa-cloud-arrow-up"></i>
-                    <span>Push to WebDAV</span>
+                    <span data-i18n="webdav_sync.push_button">Push to WebDAV</span>
                 </button>
                 <button id="webdav_sync_pull_button" class="menu_button menu_button_icon">
                     <i class="fa-solid fa-cloud-arrow-down"></i>
-                    <span>Pull from WebDAV</span>
+                    <span data-i18n="webdav_sync.pull_button">Pull from WebDAV</span>
                 </button>
                 <button id="webdav_sync_cancel_button" class="menu_button menu_button_icon"
                     style="display:none;">
                     <i class="fa-solid fa-ban"></i>
-                    <span>Cancel Job</span>
+                    <span data-i18n="webdav_sync.cancel_button">Cancel Job</span>
                 </button>
             </div>
 
@@ -51,12 +59,11 @@
 
             <small id="webdav_sync_status" class="extensions_info"></small>
 
-            <small class="extensions_info">
+            <small class="extensions_info" data-i18n="webdav_sync.push_hint">
                 Push exports your data to a zip archive, then uploads it to the WebDAV server. Because the exported
                 archive is written to your Downloads folder, select that file in the picker to finish the upload.
-                Pull downloads the remote zip and imports it into your local data directory.
             </small>
-            <small class="extensions_info">
+            <small class="extensions_info" data-i18n="webdav_sync.warning_merge">
                 Warning: pulling will merge into your current local data directory (same-path files will be overwritten).
             </small>
         </div>

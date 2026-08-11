@@ -6,5 +6,9 @@
     "js": "index.js",
     "author": "tauritavern-webdav-sync",
     "version": "1.0.0",
-    "homePage": "https://github.com/tauritavern-webdav-sync"
+    "homePage": "https://github.com/tauritavern-webdav-sync",
+    "i18n": {
+        "zh-cn": "locales/zh-cn.json",
+        "zh-tw": "locales/zh-tw.json"
+    }
 }

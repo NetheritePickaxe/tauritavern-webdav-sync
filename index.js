@@ -1,5 +1,5 @@
-import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../script.js';
+import { extension_settings, renderExtensionTemplateAsync, saveSettingsDebounced } from '../../../extensions.js';
+import { translate } from '../../../i18n.js';
 
 const MODULE_NAME = (() => {
     const match = import.meta.url.match(/\/scripts\/extensions\/(third-party\/[^/]+)\//);
@@ -10,6 +10,15 @@ const SECRET_KEY = 'webdav_sync_password';
 const JOB_POLL_INTERVAL_MS = 1200;
 const TERMINAL_JOB_STATES = new Set(['completed', 'failed', 'cancelled']);
 const DEFAULT_FILENAME = 'tauritavern-backup.zip';
+
+function localize(key, fallback) {
+    return translate(fallback, key);
+}
+
+function localizeTemplate(key, fallback, ...values) {
+    const template = localize(key, fallback);
+    return template.replace(/\$\{(\d+)\}/g, (_, index) => String(values[Number(index)] ?? ''));
+}
 
 const jobState = {
     jobId: '',
@@ -32,7 +41,7 @@ function readFailureMessage(response) {
 
 function extractErrorMessage(text) {
     if (!text) {
-        return 'Unknown error';
+        return localize('webdav_sync.unknown_error', 'Unknown error');
     }
 
     try {
@@ -47,7 +56,7 @@ function extractErrorMessage(text) {
         // Fall through to plain text.
     }
 
-    return String(text).trim() || 'Unknown error';
+    return String(text).trim() || localize('webdav_sync.unknown_error', 'Unknown error');
 }
 
 function normalizeCaughtError(error) {
@@ -126,7 +135,7 @@ async function writeSecret(key, value) {
     const response = await fetch('/api/secrets/write', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, value, label: 'WebDAV Sync password' }),
+        body: JSON.stringify({ key, value, label: localize('webdav_sync.password_label', 'WebDAV Sync password') }),
     });
     if (!response.ok) {
         throw new Error(await readFailureMessage(response));
@@ -144,13 +153,13 @@ function readCredentials() {
     const filename = String($('#webdav_sync_filename_input').val() || '').trim() || DEFAULT_FILENAME;
 
     if (!url) {
-        throw new Error('WebDAV URL is required');
+        throw new Error(localize('webdav_sync.url_required', 'WebDAV URL is required'));
     }
     if (!/^https?:\/\//i.test(url)) {
-        throw new Error('WebDAV URL must start with http:// or https://');
+        throw new Error(localize('webdav_sync.url_format', 'WebDAV URL must start with http:// or https://'));
     }
     if (!filename) {
-        throw new Error('Remote file name is required');
+        throw new Error(localize('webdav_sync.filename_required', 'Remote file name is required'));
     }
 
     return { url, username, password, filename };
@@ -182,7 +191,7 @@ function startExportJob() {
             }
             const payload = await response.json();
             if (typeof payload?.job_id !== 'string' || !payload.job_id.trim()) {
-                throw new Error('Export job id is missing');
+                throw new Error(localize('webdav_sync.export_job_id_missing', 'Export job id is missing'));
             }
             return payload.job_id.trim();
         });
@@ -264,7 +273,7 @@ async function startImportJobFromBlob(blob, filename) {
 
     const payload = await response.json();
     if (typeof payload?.job_id !== 'string' || !payload.job_id.trim()) {
-        throw new Error('Import job id is missing');
+        throw new Error(localize('webdav_sync.import_job_id_missing', 'Import job id is missing'));
     }
     return payload.job_id.trim();
 }
@@ -287,12 +296,12 @@ async function requestCancelActiveJob() {
             throw new Error(await readFailureMessage(response));
         }
 
-        setStatusText('Cancellation requested...');
-        toastr.info('Cancellation requested');
+        setStatusText(localize('webdav_sync.cancellation_requested', 'Cancellation requested...'));
+        toastr.info(localize('webdav_sync.cancellation_requested', 'Cancellation requested'), localize('webdav_sync.push_title', 'Push to WebDAV'));
     } catch (error) {
         jobState.cancelRequested = false;
         refreshControls();
-        toastr.error(normalizeCaughtError(error), 'Failed to cancel job');
+        toastr.error(normalizeCaughtError(error), localize('webdav_sync.cancel_failed', 'Failed to cancel job'));
     }
 }
 
@@ -309,16 +318,16 @@ function onSaveClick() {
         if (password) {
             writeSecret(SECRET_KEY, password)
                 .then(() => {
-                    toastr.success('Settings saved');
+                    toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
                 })
                 .catch((error) => {
-                    toastr.error(normalizeCaughtError(error), 'Failed to save password');
+                    toastr.error(normalizeCaughtError(error), localize('webdav_sync.password_save_failed', 'Failed to save password'));
                 });
         } else {
-            toastr.success('Settings saved');
+            toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
         }
     } catch (error) {
-        toastr.error(normalizeCaughtError(error), 'Failed to save settings');
+        toastr.error(normalizeCaughtError(error), localize('webdav_sync.settings_save_failed', 'Failed to save settings'));
     }
 }
 
@@ -327,14 +336,14 @@ async function uploadFileToWebdav(file) {
     try {
         credentials = readCredentials();
     } catch (error) {
-        toastr.error(normalizeCaughtError(error), 'Upload failed');
+        toastr.error(normalizeCaughtError(error), localize('webdav_sync.upload_failed', 'Upload failed'));
         return;
     }
 
     const targetUrl = buildTargetUrl(credentials);
 
     try {
-        setStatusText('Uploading to WebDAV...');
+        setStatusText(localize('webdav_sync.uploading', 'Uploading to WebDAV...'));
         await ensureRemoteDirectory(targetUrl, credentials);
 
         const response = await fetch(targetUrl, {
@@ -349,11 +358,12 @@ async function uploadFileToWebdav(file) {
             throw new Error(await readFailureMessage(response));
         }
 
-        toastr.success(`Backup uploaded: ${targetUrl}`, 'Push completed', { timeOut: 8000 });
-        setStatusText('Upload completed');
+        const localizedMsg = localizeTemplate('webdav_sync.uploaded', 'Backup uploaded: ${0}', targetUrl);
+        toastr.success(localizedMsg, localize('webdav_sync.push_completed', 'Push completed'), { timeOut: 8000 });
+        setStatusText(localize('webdav_sync.upload_completed', 'Upload completed'));
     } catch (error) {
         const failureMessage = normalizeCaughtError(error);
-        toastr.error(failureMessage, 'Upload failed');
+        toastr.error(failureMessage, localize('webdav_sync.upload_failed', 'Upload failed'));
         setStatusText(failureMessage);
     }
 }
@@ -370,7 +380,7 @@ function onUploadInputChange(event) {
 
 async function runPush() {
     if (hasActiveJob()) {
-        toastr.warning('A job is already running');
+        toastr.warning(localize('webdav_sync.job_running', 'A job is already running'));
         return;
     }
 
@@ -381,12 +391,12 @@ async function runPush() {
 
         const finalStatus = await pollUntilTerminal(jobId);
         if (finalStatus.state !== 'completed') {
-            throw new Error(finalStatus.error || 'Export failed');
+            throw new Error(normalizeCaughtError(finalStatus.error || new Error('Export failed')));
         }
 
         const saveResult = await saveExportArchive(jobId);
         if (saveResult.cleanupError) {
-            toastr.warning(saveResult.cleanupError, 'Export cleanup failed');
+            toastr.warning(saveResult.cleanupError, localize('webdav_sync.export_cleanup_failed', 'Export cleanup failed'));
         }
 
         const savedPath = saveResult.savedPath;
@@ -394,21 +404,18 @@ async function runPush() {
         stopJobTracking();
 
         if (savedPath) {
-            setStatusText(`Export saved: ${savedPath}`);
-            toastr.success(
-                `Export saved: ${savedPath}. Select this file in the picker to finish the upload.`,
-                'Push to WebDAV',
-                { timeOut: 9000 },
-            );
+            const localizedPrompt = localizeTemplate('webdav_sync.export_saved_prompt', 'Export saved: ${0}. Select this file in the picker to finish the upload.', savedPath);
+            setStatusText(localizeTemplate('webdav_sync.export_saved_status', 'Export saved: ${0}', savedPath));
+            toastr.success(localizedPrompt, localize('webdav_sync.push_title', 'Push to WebDAV'), { timeOut: 9000 });
         } else {
-            setStatusText('Export saved');
-            toastr.success('Select the exported zip file to finish the upload.', 'Push to WebDAV', { timeOut: 9000 });
+            setStatusText(localize('webdav_sync.export_saved', 'Export saved'));
+            toastr.success(localize('webdav_sync.select_exported', 'Select the exported zip file to finish the upload.'), localize('webdav_sync.push_title', 'Push to WebDAV'), { timeOut: 9000 });
         }
 
         $('#webdav_sync_upload_input').trigger('click');
     } catch (error) {
         const failureMessage = normalizeCaughtError(error);
-        toastr.error(failureMessage, 'Push failed');
+        toastr.error(failureMessage, localize('webdav_sync.push_failed', 'Push failed'));
         setStatusText(failureMessage);
         stopJobTracking();
     }
@@ -416,13 +423,11 @@ async function runPush() {
 
 async function runPull() {
     if (hasActiveJob()) {
-        toastr.warning('A job is already running');
+        toastr.warning(localize('webdav_sync.job_running', 'A job is already running'));
         return;
     }
 
-    const confirmed = window.confirm(
-        'Pulling will merge into your current local data directory (same-path files will be overwritten). Continue?',
-    );
+    const confirmed = window.confirm(localize('webdav_sync.pull_confirm', 'Pulling will merge into your current local data directory (same-path files will be overwritten). Continue?'));
     if (!confirmed) {
         return;
     }
@@ -432,7 +437,7 @@ async function runPull() {
         const credentials = readCredentials();
         const targetUrl = buildTargetUrl(credentials);
 
-        setStatusText('Downloading backup from WebDAV...');
+        setStatusText(localize('webdav_sync.downloading', 'Downloading backup from WebDAV...'));
         const response = await fetch(targetUrl, {
             method: 'GET',
             headers: { 'Authorization': basicAuthHeader(credentials.username, credentials.password) },
@@ -448,22 +453,22 @@ async function runPull() {
 
         const finalStatus = await pollUntilTerminal(jobId);
         if (finalStatus.state === 'completed') {
-            toastr.success('Backup imported. Reloading...', 'Pull completed', { timeOut: 6000 });
-            setStatusText('Import completed');
+            toastr.success(localize('webdav_sync.imported_reload', 'Backup imported. Reloading...'), localize('webdav_sync.pull_completed', 'Pull completed'), { timeOut: 6000 });
+            setStatusText(localize('webdav_sync.import_completed', 'Import completed'));
             setTimeout(() => location.reload(), 800);
             return;
         }
 
         if (finalStatus.state === 'cancelled') {
-            toastr.info('Import cancelled', 'Pull cancelled');
-            setStatusText('Import cancelled');
+            toastr.info(localize('webdav_sync.import_cancelled', 'Import cancelled'), localize('webdav_sync.pull_cancelled', 'Pull cancelled'));
+            setStatusText(localize('webdav_sync.import_cancelled', 'Import cancelled'));
             return;
         }
 
-        throw new Error(finalStatus.error || 'Import failed');
+        throw new Error(normalizeCaughtError(finalStatus.error || new Error('Import failed')));
     } catch (error) {
         const failureMessage = normalizeCaughtError(error);
-        toastr.error(failureMessage, 'Pull failed');
+        toastr.error(failureMessage, localize('webdav_sync.pull_failed', 'Pull failed'));
         setStatusText(failureMessage);
         stopJobTracking();
     }
@@ -484,7 +489,7 @@ jQuery(async () => {
     }
 
     refreshControls();
-    setStatusText('Ready');
+    setStatusText(localize('webdav_sync.ready', 'Ready'));
 
     $('#webdav_sync_save_button').on('click', onSaveClick);
     $('#webdav_sync_push_button').on('click', runPush);
