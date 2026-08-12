@@ -448,12 +448,6 @@ async function runExportAndUpload() {
         return false;
     }
 
-    if (blob === null) {
-        // Mobile fallback: unsupported — exportViaJobFallback returns null on mobile.
-        toastr.error(localize('webdav_sync.mobile_push_unsupported', 'Push is not supported on mobile with this App version. Please use desktop.'), localize('webdav_sync.export_failed', 'Export failed'));
-        return false;
-    }
-
     return uploadFileToWebdav(blob);
 }
 

@@ -38,7 +38,6 @@
     "webdav_sync.export_failed": "匯出失敗",
     "webdav_sync.export_saved_path_missing": "匯出檔案儲存路徑缺失",
     "webdav_sync.export_file_pick_cancelled": "檔案選擇已取消",
-    "webdav_sync.mobile_push_unsupported": "目前 App 版本在行動裝置上不支援推送，請使用桌面端。",
     "webdav_sync.cancel_failed": "取消任務失敗",
     "webdav_sync.push_title": "推送到 WebDAV",
     "webdav_sync.push_failed": "推送失敗",
