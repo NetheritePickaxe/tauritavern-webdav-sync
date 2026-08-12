@@ -36,6 +36,7 @@
     "webdav_sync.upload_failed": "上傳失敗",
     "webdav_sync.export_job_id_missing": "匯出任務 ID 缺失",
     "webdav_sync.export_failed": "匯出失敗",
+    "webdav_sync.export_saved_path_missing": "匯出檔案儲存路徑缺失",
     "webdav_sync.cancellation_requested": "已請求取消...",
     "webdav_sync.cancel_failed": "取消任務失敗",
     "webdav_sync.push_title": "推送到 WebDAV",
@@ -55,5 +56,6 @@
     "webdav_sync.ready": "就緒",
     "webdav_sync.synced_at": "上次同步：${0}",
     "webdav_sync.auto_push_no_settings": "已開啟自動推送但未配置設定",
-    "webdav_sync.auto_push_running": "自動推送正在進行中"
+    "webdav_sync.auto_push_running": "自動推送正在進行中",
+    "webdav_sync.old_app_mobile_unsupported": "目前 App 版本不支援行動裝置自動推送，請升級至 TauriTavern v2.3.0+ 或在桌面端手動推送。"
 }

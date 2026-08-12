@@ -2,6 +2,7 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 import { saveSettingsDebounced } from '../../../../script.js';
 import { translate } from '../../../i18n.js';
 import { eventSource, event_types } from '../../../../script.js';
+import { isAndroidRuntime, isIosRuntime } from '../../../util/mobile-runtime.js';
 
 const MODULE_NAME = (() => {
     const match = import.meta.url.match(/\/scripts\/extensions\/(third-party\/[^/]+)\//);
@@ -15,6 +16,7 @@ const AUTO_PUSH_DEBOUNCE_MS = 5000;
 const DEFAULT_FILENAME = 'tauritavern-backup.zip';
 const DEFAULT_USER_HANDLE = 'default-user';
 const DEFAULT_SYNC_INTERVAL_MINUTES = 30;
+const OLD_APP_VERSION_NOTICE_KEY = 'webdav_sync.old_app_version_notice_shown';
 
 function localize(key, fallback) {
     return translate(fallback, key);
@@ -35,6 +37,12 @@ let autoPushPending = false;
 let autoPushDebounceId = null;
 let autoPushIntervalId = null;
 let autoSyncDirty = false;
+
+// Capability probe result, cached after first check.
+// true  = /api/users/backup is supported (App >= v2.3.0)
+// false = not supported (App < v2.3.0), use job-based fallback
+// undefined = not yet probed
+let _apiSupportsUserBackup = /** @type {boolean|null|undefined} */ (undefined);
 
 function isAutoSyncBusy() {
     return autoPushPending || hasActiveJob();
@@ -128,6 +136,23 @@ function stopJobTracking() {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Probes whether the host App supports the /api/users/backup endpoint.
+ * Result is cached in _apiSupportsUserBackup so subsequent calls are O(1).
+ */
+async function apiSupportsUserBackup() {
+    if (_apiSupportsUserBackup !== undefined) {
+        return _apiSupportsUserBackup;
+    }
+    try {
+        const r = await fetch('/api/users/backup', { method: 'HEAD' });
+        _apiSupportsUserBackup = r.status !== 404 && r.status !== 501;
+    } catch {
+        _apiSupportsUserBackup = false;
+    }
+    return _apiSupportsUserBackup;
 }
 
 async function findSecret(key) {
@@ -255,6 +280,22 @@ async function pollUntilTerminal(jobId) {
     }
 }
 
+async function saveExportArchive(jobId) {
+    const response = await fetch('/api/extensions/data-migration/export/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId }),
+    });
+    if (!response.ok) {
+        throw new Error(await readFailureMessage(response));
+    }
+    const payload = await response.json();
+    return {
+        savedPath: String(payload?.saved_target || ''),
+        cleanupError: payload?.cleanup_error ? String(payload.cleanup_error) : null,
+    };
+}
+
 async function startImportJobFromBlob(blob, filename) {
     const formData = new FormData();
     formData.append('archive', blob, filename);
@@ -301,7 +342,22 @@ async function requestCancelActiveJob() {
     }
 }
 
+/**
+ * Exports user data as a zip blob.
+ * - New API (App >= v2.3.0): direct streaming via /api/users/backup, no local file.
+ * - Fallback (App < v2.3.0): job-based export via /api/extensions/data-migration/export,
+ *   saves to downloads, then reads back. Desktop is fully automatic; mobile shows
+ *   a system file picker during the /save step.
+ */
 async function exportUserBackupArchive() {
+    const supportsNewApi = await apiSupportsUserBackup();
+    if (supportsNewApi) {
+        return exportViaNewApi();
+    }
+    return exportViaJobFallback();
+}
+
+async function exportViaNewApi() {
     const handle = String(getSettings().userHandle || DEFAULT_USER_HANDLE).trim() || DEFAULT_USER_HANDLE;
     const response = await fetch('/api/users/backup', {
         method: 'POST',
@@ -310,6 +366,26 @@ async function exportUserBackupArchive() {
     });
     if (!response.ok) {
         throw new Error(await readFailureMessage(response));
+    }
+    return response.blob();
+}
+
+async function exportViaJobFallback() {
+    const jobId = await startExportJob();
+    const finalStatus = await pollUntilTerminal(jobId);
+    if (finalStatus.state !== 'completed') {
+        throw new Error(normalizeCaughtError(finalStatus.error || new Error('Export failed')));
+    }
+    const { savedPath, cleanupError } = await saveExportArchive(jobId);
+    if (cleanupError) {
+        console.warn('Export cleanup warning:', cleanupError);
+    }
+    if (!savedPath) {
+        throw new Error(localize('webdav_sync.export_saved_path_missing', 'Export saved path is missing'));
+    }
+    const response = await fetch(savedPath);
+    if (!response.ok) {
+        throw new Error(`Failed to read saved export: ${response.status}`);
     }
     return response.blob();
 }
@@ -470,7 +546,13 @@ async function runAutoPushOnce() {
     }
 }
 
-function scheduleAutoPush() {
+/**
+ * Schedules periodic auto-push. On mobile with an old App (< v2.3.0) that lacks
+ * /api/users/backup, the job-based fallback would trigger a system file picker
+ * on every interval tick, disrupting the user. In that case we disable the
+ * interval and show a one-time notification.
+ */
+async function scheduleAutoPush() {
     const settings = getSettings();
     if (autoPushIntervalId !== null) {
         clearInterval(autoPushIntervalId);
@@ -481,6 +563,15 @@ function scheduleAutoPush() {
         return;
     }
 
+    // On mobile with an old App, auto-push is unsupported — show one-time notice.
+    if (isAndroidRuntime() || isIosRuntime()) {
+        const supportsNewApi = await apiSupportsUserBackup();
+        if (!supportsNewApi) {
+            showOldAppMobileNoticeOnce();
+            return;
+        }
+    }
+
     autoPushIntervalId = setInterval(() => {
         if (isAutoSyncBusy()) {
             autoSyncDirty = true;
@@ -488,6 +579,18 @@ function scheduleAutoPush() {
         }
         runAutoPushOnce();
     }, (Number(settings.syncIntervalMinutes) || DEFAULT_SYNC_INTERVAL_MINUTES) * 60 * 1000);
+}
+
+function showOldAppMobileNoticeOnce() {
+    if (sessionStorage.getItem(OLD_APP_VERSION_NOTICE_KEY)) {
+        return;
+    }
+    sessionStorage.setItem(OLD_APP_VERSION_NOTICE_KEY, '1');
+    toastr.warning(
+        localize('webdav_sync.old_app_mobile_unsupported', 'Auto-push is unavailable on mobile with this App version. Please upgrade to TauriTavern v2.3.0+ or use manual push on desktop.'),
+        localize('webdav_sync.push_title', 'Push to WebDAV')
+    );
+    setStatusText(localize('webdav_sync.old_app_mobile_unsupported', 'Auto-push unavailable on mobile (App < v2.3.0)'));
 }
 
 function onEventDebounced() {
@@ -603,7 +706,7 @@ jQuery(async () => {
     eventSource.on(event_types.SECRET_ROTATED, onEventDebounced);
     eventSource.on(event_types.SETTINGS_UPDATED, onEventDebounced);
 
-    scheduleAutoPush();
+    await scheduleAutoPush();
 
     if (settings.autoPushEnabled && settings.url) {
         if (isAutoSyncBusy()) {
