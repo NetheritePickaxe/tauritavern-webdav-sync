@@ -22,7 +22,7 @@
                     autocomplete="username" />
                 <input id="webdav_sync_password_input" class="text_pole" type="password"
                     data-i18n="[placeholder]webdav_sync.password_placeholder"
-                    placeholder="Password (stored as a secret)"
+                    placeholder="Password"
                     autocomplete="current-password" />
             </div>
 
@@ -96,6 +96,8 @@
             <small class="extensions_info" data-i18n="webdav_sync.warning_merge">
                 Warning: pulling will merge into your current local data directory (same-path files will be overwritten).
             </small>
+            <!-- Hidden file picker for job-based fallback (App < v2.3.0 on desktop) -->
+            <input id="webdav_sync_file_input" type="file" accept=".zip" style="display:none" />
         </div>
     </div>
 </div>

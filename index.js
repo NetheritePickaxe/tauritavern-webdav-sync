@@ -9,7 +9,6 @@ const MODULE_NAME = (() => {
     return match ? match[1] : 'webdav-sync';
 })();
 
-const SECRET_KEY = 'webdav_sync_password';
 const JOB_POLL_INTERVAL_MS = 1200;
 const TERMINAL_JOB_STATES = new Set(['completed', 'failed', 'cancelled']);
 const AUTO_PUSH_DEBOUNCE_MS = 5000;
@@ -155,31 +154,6 @@ async function apiSupportsUserBackup() {
     return _apiSupportsUserBackup;
 }
 
-async function findSecret(key) {
-    const response = await fetch('/api/secrets/find', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key }),
-    });
-    if (!response.ok) {
-        return '';
-    }
-
-    const payload = await response.json();
-    return String(payload?.value || '');
-}
-
-async function writeSecret(key, value) {
-    const response = await fetch('/api/secrets/write', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, value, label: localize('webdav_sync.password_label', 'WebDAV Sync password') }),
-    });
-    if (!response.ok) {
-        throw new Error(await readFailureMessage(response));
-    }
-}
-
 function basicAuthHeader(username, password) {
     return 'Basic ' + btoa(`${username}:${password}`);
 }
@@ -187,7 +161,11 @@ function basicAuthHeader(username, password) {
 function readCredentials() {
     const url = String($('#webdav_sync_url_input').val() || '').trim();
     const username = String($('#webdav_sync_username_input').val() || '').trim();
-    const password = String($('#webdav_sync_password_input').val() || '');
+    // Password is stored in extension_settings (key: webdav_sync_password), with a
+    // typed-in value taking precedence (for one-time use without saving).
+    const settingsPassword = String(getSettings().password || '');
+    const inputPassword = String($('#webdav_sync_password_input').val() || '').trim();
+    const password = inputPassword || settingsPassword;
     const filename = String($('#webdav_sync_filename_input').val() || '').trim() || DEFAULT_FILENAME;
 
     if (!url) {
@@ -371,6 +349,10 @@ async function exportViaNewApi() {
 }
 
 async function exportViaJobFallback() {
+    if (isAndroidRuntime() || isIosRuntime()) {
+        return null;
+    }
+
     const jobId = await startExportJob();
     const finalStatus = await pollUntilTerminal(jobId);
     if (finalStatus.state !== 'completed') {
@@ -383,11 +365,48 @@ async function exportViaJobFallback() {
     if (!savedPath) {
         throw new Error(localize('webdav_sync.export_saved_path_missing', 'Export saved path is missing'));
     }
-    const response = await fetch(savedPath);
-    if (!response.ok) {
-        throw new Error(`Failed to read saved export: ${response.status}`);
+
+    // Trigger file picker for the saved archive.
+    const file = await pickExportFile(savedPath);
+    if (!file) {
+        throw new Error(localize('webdav_sync.export_file_pick_cancelled', 'File selection cancelled'));
     }
-    return response.blob();
+    return file;
+}
+
+/**
+ * Opens a hidden file picker pre-filled with the expected export path.
+ * Returns the selected File, or null if the user cancels.
+ */
+function pickExportFile(preferredPath) {
+    return new Promise((resolve) => {
+        const input = $('#webdav_sync_file_input')[0];
+        if (!input) {
+            resolve(null);
+            return;
+        }
+
+        const handler = (event) => {
+            input.removeEventListener('change', handler);
+            const files = event.target?.files;
+            if (files && files.length > 0) {
+                resolve(files[0]);
+            } else {
+                resolve(null);
+            }
+        };
+
+        input.addEventListener('change', handler);
+
+        // Try to set the value directly so the picker opens at the expected path.
+        try {
+            input.value = preferredPath;
+        } catch {
+            // ignore — some WebView implementations reject setting value programmatically
+        }
+
+        input.click();
+    });
 }
 
 async function uploadFileToWebdav(file) {
@@ -437,6 +456,12 @@ async function runExportAndUpload() {
         const failureMessage = normalizeCaughtError(error);
         toastr.error(failureMessage, localize('webdav_sync.export_failed', 'Export failed'));
         setStatusText(failureMessage);
+        return false;
+    }
+
+    if (blob === null) {
+        // Mobile fallback: unsupported — exportViaJobFallback returns null on mobile.
+        toastr.error(localize('webdav_sync.mobile_push_unsupported', 'Push is not supported on mobile with this App version. Please use desktop.'), localize('webdav_sync.export_failed', 'Export failed'));
         return false;
     }
 
@@ -621,6 +646,7 @@ function onSaveClick() {
         const settings = getSettings();
         settings.url = credentials.url;
         settings.username = credentials.username;
+        settings.password = credentials.password;
         settings.filename = credentials.filename;
         settings.userHandle = String($('#webdav_sync_user_handle_input').val() || '').trim() || DEFAULT_USER_HANDLE;
         settings.syncIntervalMinutes = Number($('#webdav_sync_interval_input').val()) || DEFAULT_SYNC_INTERVAL_MINUTES;
@@ -628,18 +654,7 @@ function onSaveClick() {
         settings.autoPullEnabled = $('#webdav_sync_auto_pull_toggle').is(':checked');
         persistSettings();
 
-        const password = String($('#webdav_sync_password_input').val() || '');
-        if (password) {
-            writeSecret(SECRET_KEY, password)
-                .then(() => {
-                    toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
-                })
-                .catch((error) => {
-                    toastr.error(normalizeCaughtError(error), localize('webdav_sync.password_save_failed', 'Failed to save password'));
-                });
-        } else {
-            toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
-        }
+        toastr.success(localize('webdav_sync.settings_saved', 'Settings saved'), localize('webdav_sync.push_title', 'Push to WebDAV'));
 
         scheduleAutoPush();
     } catch (error) {
@@ -654,16 +669,12 @@ jQuery(async () => {
     const settings = getSettings();
     $('#webdav_sync_url_input').val(settings.url || '');
     $('#webdav_sync_username_input').val(settings.username || '');
+    $('#webdav_sync_password_input').val(settings.password || '');
     $('#webdav_sync_filename_input').val(settings.filename || DEFAULT_FILENAME);
     $('#webdav_sync_user_handle_input').val(settings.userHandle || DEFAULT_USER_HANDLE);
     $('#webdav_sync_interval_input').val(settings.syncIntervalMinutes || DEFAULT_SYNC_INTERVAL_MINUTES);
     $('#webdav_sync_auto_push_toggle').prop('checked', Boolean(settings.autoPushEnabled));
     $('#webdav_sync_auto_pull_toggle').prop('checked', Boolean(settings.autoPullEnabled));
-
-    const storedPassword = await findSecret(SECRET_KEY);
-    if (storedPassword) {
-        $('#webdav_sync_password_input').val(storedPassword);
-    }
 
     refreshControls();
     setStatusText(settings.lastAutoSyncTime
