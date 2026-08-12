@@ -32,7 +32,13 @@ const jobState = {
 };
 
 let autoPushPending = false;
-let autoPushTimerId = null;
+let autoPushDebounceId = null;
+let autoPushIntervalId = null;
+let autoSyncDirty = false;
+
+function isAutoSyncBusy() {
+    return autoPushPending || hasActiveJob();
+}
 
 function getSettings() {
     return (extension_settings.webdav_sync ??= {});
@@ -439,52 +445,70 @@ async function runPull() {
     }
 }
 
-function triggerAutoPush() {
-    const settings = getSettings();
-    if (!settings.autoPushEnabled) {
+async function runAutoPushOnce() {
+    if (isAutoSyncBusy()) {
         return;
     }
-    if (!settings.url) {
-        setStatusText(localize('webdav_sync.auto_push_no_settings', 'Auto-push enabled but no settings configured'));
-        return;
-    }
-    if (hasActiveJob() || autoPushPending) {
-        return;
-    }
-
     autoPushPending = true;
-    runExportAndUpload()
-        .finally(() => {
-            autoPushPending = false;
-        });
+    try {
+        const success = await runExportAndUpload();
+        if (success) {
+            const now = new Date().toLocaleString();
+            const settings = getSettings();
+            settings.lastAutoSyncTime = now;
+            persistSettings();
+            setStatusText(localizeTemplate('webdav_sync.synced_at', 'Last sync: ${0}', now));
+        }
+    } catch (error) {
+        // runExportAndUpload already surfaces errors via toastr; we just need to unlock.
+    } finally {
+        autoPushPending = false;
+    }
+    if (autoSyncDirty) {
+        autoSyncDirty = false;
+        runAutoPushOnce();
+    }
 }
 
 function scheduleAutoPush() {
     const settings = getSettings();
-    if (autoPushTimerId !== null) {
-        clearInterval(autoPushTimerId);
-        autoPushTimerId = null;
+    if (autoPushIntervalId !== null) {
+        clearInterval(autoPushIntervalId);
+        autoPushIntervalId = null;
     }
 
     if (!settings.autoPushEnabled || !settings.url) {
         return;
     }
 
-    autoPushTimerId = setInterval(() => {
-        if (!autoPushPending && !hasActiveJob()) {
-            triggerAutoPush();
+    autoPushIntervalId = setInterval(() => {
+        if (isAutoSyncBusy()) {
+            autoSyncDirty = true;
+            return;
         }
+        runAutoPushOnce();
     }, (Number(settings.syncIntervalMinutes) || DEFAULT_SYNC_INTERVAL_MINUTES) * 60 * 1000);
 }
 
 function onEventDebounced() {
-    if (autoPushPending) {
+    const settings = getSettings();
+    if (!settings.autoPushEnabled) {
         return;
     }
-    autoPushPending = true;
-    setTimeout(() => {
-        autoPushPending = false;
-        triggerAutoPush();
+    if (isAutoSyncBusy()) {
+        autoSyncDirty = true;
+        return;
+    }
+    if (autoPushDebounceId !== null) {
+        clearTimeout(autoPushDebounceId);
+    }
+    autoPushDebounceId = setTimeout(() => {
+        autoPushDebounceId = null;
+        if (isAutoSyncBusy()) {
+            autoSyncDirty = true;
+            return;
+        }
+        runAutoPushOnce();
     }, AUTO_PUSH_DEBOUNCE_MS);
 }
 
@@ -549,21 +573,44 @@ jQuery(async () => {
     $('#webdav_sync_pull_button').on('click', runPull);
     $('#webdav_sync_cancel_button').on('click', requestCancelActiveJob);
 
-    eventSource.on(event_types.CHAT_CHANGED, onEventDebounced);
-    eventSource.on(event_types.MESSAGE_SENT, onEventDebounced);
-    eventSource.on(event_types.USER_MESSAGE_RENDERED, onEventDebounced);
+    eventSource.on(event_types.GENERATION_ENDED, onEventDebounced);
+    eventSource.on(event_types.MESSAGE_UPDATED, onEventDebounced);
     eventSource.on(event_types.MESSAGE_EDITED, onEventDebounced);
     eventSource.on(event_types.MESSAGE_DELETED, onEventDebounced);
+    eventSource.on(event_types.MESSAGE_SWIPED, onEventDebounced);
+    eventSource.on(event_types.MESSAGE_FILE_EMBEDDED, onEventDebounced);
+    eventSource.on(event_types.CHAT_CHANGED, onEventDebounced);
+    eventSource.on(event_types.CHAT_CREATED, onEventDebounced);
+    eventSource.on(event_types.CHAT_RENAMED, onEventDebounced);
+    eventSource.on(event_types.CHAT_DELETED, onEventDebounced);
+    eventSource.on(event_types.GROUP_UPDATED, onEventDebounced);
+    eventSource.on(event_types.GROUP_CHAT_CREATED, onEventDebounced);
+    eventSource.on(event_types.GROUP_CHAT_DELETED, onEventDebounced);
+    eventSource.on(event_types.CHARACTER_EDITED, onEventDebounced);
     eventSource.on(event_types.CHARACTER_DELETED, onEventDebounced);
-    eventSource.on(event_types.WORLDINFO_FORCE_ACTIVATE, onEventDebounced);
+    eventSource.on(event_types.CHARACTER_DUPLICATED, onEventDebounced);
+    eventSource.on(event_types.CHARACTER_RENAMED, onEventDebounced);
+    eventSource.on(event_types.PERSONA_CREATED, onEventDebounced);
+    eventSource.on(event_types.PERSONA_UPDATED, onEventDebounced);
+    eventSource.on(event_types.PERSONA_RENAMED, onEventDebounced);
+    eventSource.on(event_types.PERSONA_DELETED, onEventDebounced);
+    eventSource.on(event_types.WORLDINFO_UPDATED, onEventDebounced);
+    eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, onEventDebounced);
+    eventSource.on(event_types.PRESET_CHANGED, onEventDebounced);
+    eventSource.on(event_types.OAI_PRESET_CHANGED_AFTER, onEventDebounced);
+    eventSource.on(event_types.SECRET_WRITTEN, onEventDebounced);
+    eventSource.on(event_types.SECRET_DELETED, onEventDebounced);
+    eventSource.on(event_types.SECRET_ROTATED, onEventDebounced);
+    eventSource.on(event_types.SETTINGS_UPDATED, onEventDebounced);
 
     scheduleAutoPush();
 
     if (settings.autoPushEnabled && settings.url) {
-        if (hasActiveJob() || autoPushPending) {
+        if (isAutoSyncBusy()) {
+            autoSyncDirty = true;
             setStatusText(localize('webdav_sync.auto_push_running', 'Auto-push is currently running'));
         } else {
-            triggerAutoPush();
+            runAutoPushOnce();
         }
     }
 });
