@@ -2,20 +2,15 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 import { saveSettingsDebounced } from '../../../../script.js';
 import { translate } from '../../../i18n.js';
 import { eventSource, event_types } from '../../../../script.js';
-import { isAndroidRuntime, isIosRuntime } from '../../../util/mobile-runtime.js';
 
 const MODULE_NAME = (() => {
     const match = import.meta.url.match(/\/scripts\/extensions\/(third-party\/[^/]+)\//);
     return match ? match[1] : 'webdav-sync';
 })();
 
-const JOB_POLL_INTERVAL_MS = 1200;
-const TERMINAL_JOB_STATES = new Set(['completed', 'failed', 'cancelled']);
-const AUTO_PUSH_DEBOUNCE_MS = 5000;
 const DEFAULT_FILENAME = 'tauritavern-backup.zip';
 const DEFAULT_USER_HANDLE = 'default-user';
 const DEFAULT_SYNC_INTERVAL_MINUTES = 30;
-const OLD_APP_VERSION_NOTICE_KEY = 'webdav_sync.old_app_version_notice_shown';
 
 function localize(key, fallback) {
     return translate(fallback, key);
@@ -26,25 +21,13 @@ function localizeTemplate(key, fallback, ...values) {
     return template.replace(/\$\{(\d+)\}/g, (_, index) => String(values[Number(index)] ?? ''));
 }
 
-const jobState = {
-    jobId: '',
-    starting: false,
-    cancelRequested: false,
-};
-
 let autoPushPending = false;
 let autoPushDebounceId = null;
 let autoPushIntervalId = null;
 let autoSyncDirty = false;
 
-// Capability probe result, cached after first check.
-// true  = /api/users/backup is supported (App >= v2.3.0)
-// false = not supported (App < v2.3.0), use job-based fallback
-// undefined = not yet probed
-let _apiSupportsUserBackup = /** @type {boolean|null|undefined} */ (undefined);
-
 function isAutoSyncBusy() {
-    return autoPushPending || hasActiveJob();
+    return autoPushPending;
 }
 
 function getSettings() {
@@ -92,49 +75,22 @@ function setStatusText(message) {
 }
 
 function refreshControls() {
-    const busy = hasActiveJob();
-    $('#webdav_sync_save_button').prop('disabled', busy);
-    $('#webdav_sync_push_button').prop('disabled', busy);
-    $('#webdav_sync_pull_button').prop('disabled', busy);
+    $('#webdav_sync_save_button').prop('disabled', autoPushPending);
+    $('#webdav_sync_push_button').prop('disabled', autoPushPending);
+    $('#webdav_sync_pull_button').prop('disabled', autoPushPending);
+}
 
-    const cancelButton = $('#webdav_sync_cancel_button');
-    if (jobState.jobId) {
-        cancelButton.show();
-        cancelButton.prop('disabled', jobState.cancelRequested);
-        return;
+async function exportUserBackupArchive() {
+    const handle = String(getSettings().userHandle || DEFAULT_USER_HANDLE).trim() || DEFAULT_USER_HANDLE;
+    const response = await fetch('/api/users/backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handle }),
+    });
+    if (!response.ok) {
+        throw new Error(await readFailureMessage(response));
     }
-
-    cancelButton.hide();
-    cancelButton.prop('disabled', false);
-}
-
-function hasActiveJob() {
-    return jobState.starting || Boolean(jobState.jobId);
-}
-
-function markJobStarting() {
-    jobState.jobId = '';
-    jobState.starting = true;
-    jobState.cancelRequested = false;
-    refreshControls();
-}
-
-function startJobTracking(jobId) {
-    jobState.jobId = jobId;
-    jobState.starting = false;
-    jobState.cancelRequested = false;
-    refreshControls();
-}
-
-function stopJobTracking() {
-    jobState.jobId = '';
-    jobState.starting = false;
-    jobState.cancelRequested = false;
-    refreshControls();
-}
-
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return response.blob();
 }
 
 function basicAuthHeader(username, password) {
@@ -144,8 +100,6 @@ function basicAuthHeader(username, password) {
 function readCredentials() {
     const url = String($('#webdav_sync_url_input').val() || '').trim();
     const username = String($('#webdav_sync_username_input').val() || '').trim();
-    // Password is stored in extension_settings (key: webdav_sync_password), with a
-    // typed-in value taking precedence (for one-time use without saving).
     const settingsPassword = String(getSettings().password || '');
     const inputPassword = String($('#webdav_sync_password_input').val() || '').trim();
     const password = inputPassword || settingsPassword;
@@ -182,18 +136,23 @@ async function ensureRemoteDirectory(targetUrl, credentials) {
     }
 }
 
-function startExportJob() {
-    return fetch('/api/extensions/data-migration/export', { method: 'POST' })
-        .then(async (response) => {
-            if (!response.ok) {
-                throw new Error(await readFailureMessage(response));
-            }
-            const payload = await response.json();
-            if (typeof payload?.job_id !== 'string' || !payload.job_id.trim()) {
-                throw new Error(localize('webdav_sync.export_job_id_missing', 'Export job id is missing'));
-            }
-            return payload.job_id.trim();
-        });
+async function startImportJobFromBlob(blob, filename) {
+    const formData = new FormData();
+    formData.append('archive', blob, filename);
+
+    const response = await fetch('/api/extensions/data-migration/import', {
+        method: 'POST',
+        body: formData,
+    });
+    if (!response.ok) {
+        throw new Error(await readFailureMessage(response));
+    }
+
+    const payload = await response.json();
+    if (typeof payload?.job_id !== 'string' || !payload.job_id.trim()) {
+        throw new Error(localize('webdav_sync.import_job_id_missing', 'Import job id is missing'));
+    }
+    return payload.job_id.trim();
 }
 
 async function fetchJobStatus(jobId) {
@@ -228,174 +187,20 @@ function updateStatusFromJob(status) {
     }
 }
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function pollUntilTerminal(jobId) {
+    const terminalStates = new Set(['completed', 'failed', 'cancelled']);
     while (true) {
         const status = await fetchJobStatus(jobId);
         updateStatusFromJob(status);
-
-        if (TERMINAL_JOB_STATES.has(status.state)) {
+        if (terminalStates.has(status.state)) {
             return status;
         }
-
-        await sleep(JOB_POLL_INTERVAL_MS);
+        await sleep(1200);
     }
-}
-
-async function saveExportArchive(jobId) {
-    const response = await fetch('/api/extensions/data-migration/export/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId }),
-    });
-    if (!response.ok) {
-        throw new Error(await readFailureMessage(response));
-    }
-    const payload = await response.json();
-    return {
-        savedPath: String(payload?.saved_target || ''),
-        cleanupError: payload?.cleanup_error ? String(payload.cleanup_error) : null,
-    };
-}
-
-async function startImportJobFromBlob(blob, filename) {
-    const formData = new FormData();
-    formData.append('archive', blob, filename);
-
-    const response = await fetch('/api/extensions/data-migration/import', {
-        method: 'POST',
-        body: formData,
-    });
-    if (!response.ok) {
-        throw new Error(await readFailureMessage(response));
-    }
-
-    const payload = await response.json();
-    if (typeof payload?.job_id !== 'string' || !payload.job_id.trim()) {
-        throw new Error(localize('webdav_sync.import_job_id_missing', 'Import job id is missing'));
-    }
-    return payload.job_id.trim();
-}
-
-async function requestCancelActiveJob() {
-    if (!hasActiveJob() || jobState.cancelRequested) {
-        return;
-    }
-
-    jobState.cancelRequested = true;
-    refreshControls();
-
-    try {
-        const response = await fetch('/api/extensions/data-migration/job/cancel', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ job_id: jobState.jobId }),
-        });
-        if (!response.ok) {
-            throw new Error(await readFailureMessage(response));
-        }
-
-        setStatusText(localize('webdav_sync.cancellation_requested', 'Cancellation requested...'));
-        toastr.info(localize('webdav_sync.cancellation_requested', 'Cancellation requested'), localize('webdav_sync.push_title', 'Push to WebDAV'));
-    } catch (error) {
-        jobState.cancelRequested = false;
-        refreshControls();
-        toastr.error(normalizeCaughtError(error), localize('webdav_sync.cancel_failed', 'Failed to cancel job'));
-    }
-}
-
-/**
- * Exports user data as a zip blob.
- * - New API (App >= v2.3.0): direct streaming via /api/users/backup, no local file.
- * - Fallback (App < v2.3.0): job-based export via /api/extensions/data-migration/export,
- *   saves to downloads, then reads back. Desktop is fully automatic; mobile shows
- *   a system file picker during the /save step.
- */
-async function exportUserBackupArchive() {
-    try {
-        return await exportViaNewApi();
-    } catch (error) {
-        const msg = normalizeCaughtError(error);
-        // If the new endpoint is unavailable (404, 501, network failure), fall back
-        // to the job-based export that works on older App versions.
-        if (msg.includes('Failed to fetch') ||
-            msg.includes('Not Found') ||
-            msg.includes('Not allowed') ||
-            msg.includes('404') ||
-            msg.includes('501')) {
-            return exportViaJobFallback();
-        }
-        throw error;
-    }
-}
-
-async function exportViaNewApi() {
-    const handle = String(getSettings().userHandle || DEFAULT_USER_HANDLE).trim() || DEFAULT_USER_HANDLE;
-    const response = await fetch('/api/users/backup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ handle }),
-    });
-    if (!response.ok) {
-        throw new Error(await readFailureMessage(response));
-    }
-    return response.blob();
-}
-
-async function exportViaJobFallback() {
-    const jobId = await startExportJob();
-    const finalStatus = await pollUntilTerminal(jobId);
-    if (finalStatus.state !== 'completed') {
-        throw new Error(normalizeCaughtError(finalStatus.error || new Error('Export failed')));
-    }
-    const { savedPath, cleanupError } = await saveExportArchive(jobId);
-    if (cleanupError) {
-        console.warn('Export cleanup warning:', cleanupError);
-    }
-    if (!savedPath) {
-        throw new Error(localize('webdav_sync.export_saved_path_missing', 'Export saved path is missing'));
-    }
-
-    // Trigger file picker for the saved archive.
-    const file = await pickExportFile(savedPath);
-    if (!file) {
-        throw new Error(localize('webdav_sync.export_file_pick_cancelled', 'File selection cancelled'));
-    }
-    return file;
-}
-
-/**
- * Opens a hidden file picker pre-filled with the expected export path.
- * Returns the selected File, or null if the user cancels.
- */
-function pickExportFile(preferredPath) {
-    return new Promise((resolve) => {
-        const input = $('#webdav_sync_file_input')[0];
-        if (!input) {
-            resolve(null);
-            return;
-        }
-
-        const handler = (event) => {
-            input.removeEventListener('change', handler);
-            const files = event.target?.files;
-            if (files && files.length > 0) {
-                resolve(files[0]);
-            } else {
-                resolve(null);
-            }
-        };
-
-        input.addEventListener('change', handler);
-
-        // Try to set the value directly so the picker opens at the expected path.
-        try {
-            input.value = preferredPath;
-        } catch {
-            // ignore — some WebView implementations reject setting value programmatically
-        }
-
-        input.click();
-    });
 }
 
 async function uploadFileToWebdav(file) {
@@ -447,17 +252,16 @@ async function runExportAndUpload() {
         setStatusText(failureMessage);
         return false;
     }
-
     return uploadFileToWebdav(blob);
 }
 
 async function runPush() {
-    if (hasActiveJob()) {
+    if (autoPushPending) {
         toastr.warning(localize('webdav_sync.job_running', 'A job is already running'));
         return;
     }
-
-    markJobStarting();
+    autoPushPending = true;
+    refreshControls();
     try {
         const success = await runExportAndUpload();
         if (success) {
@@ -467,27 +271,27 @@ async function runPush() {
             persistSettings();
             setStatusText(localizeTemplate('webdav_sync.synced_at', 'Last sync: ${0}', now));
         }
-        stopJobTracking();
-    } catch (error) {
-        const failureMessage = normalizeCaughtError(error);
-        toastr.error(failureMessage, localize('webdav_sync.push_failed', 'Push failed'));
-        setStatusText(failureMessage);
-        stopJobTracking();
+    } finally {
+        autoPushPending = false;
+        refreshControls();
     }
 }
 
 async function runPull() {
-    if (hasActiveJob()) {
+    if (autoPushPending) {
         toastr.warning(localize('webdav_sync.job_running', 'A job is already running'));
         return;
     }
+    autoPushPending = true;
+    refreshControls();
 
     const confirmed = window.confirm(localize('webdav_sync.pull_confirm', 'Pulling will merge into your current local data directory (same-path files will be overwritten). Continue?'));
     if (!confirmed) {
+        autoPushPending = false;
+        refreshControls();
         return;
     }
 
-    markJobStarting();
     try {
         const credentials = readCredentials();
         const targetUrl = buildTargetUrl(credentials);
@@ -504,7 +308,7 @@ async function runPull() {
 
         const blob = await response.blob();
         const jobId = await startImportJobFromBlob(blob, credentials.filename);
-        startJobTracking(jobId);
+        setStatusText(localize('webdav_sync.importing', 'Importing backup...'));
 
         const finalStatus = await pollUntilTerminal(jobId);
         if (finalStatus.state === 'completed') {
@@ -525,12 +329,14 @@ async function runPull() {
         const failureMessage = normalizeCaughtError(error);
         toastr.error(failureMessage, localize('webdav_sync.pull_failed', 'Pull failed'));
         setStatusText(failureMessage);
-        stopJobTracking();
+    } finally {
+        autoPushPending = false;
+        refreshControls();
     }
 }
 
 async function runAutoPushOnce() {
-    if (isAutoSyncBusy()) {
+    if (autoPushPending) {
         return;
     }
     autoPushPending = true;
@@ -543,8 +349,6 @@ async function runAutoPushOnce() {
             persistSettings();
             setStatusText(localizeTemplate('webdav_sync.synced_at', 'Last sync: ${0}', now));
         }
-    } catch (error) {
-        // runExportAndUpload already surfaces errors via toastr; we just need to unlock.
     } finally {
         autoPushPending = false;
     }
@@ -554,13 +358,7 @@ async function runAutoPushOnce() {
     }
 }
 
-/**
- * Schedules periodic auto-push. On mobile with an old App (< v2.3.0) that lacks
- * /api/users/backup, the job-based fallback would trigger a system file picker
- * on every interval tick, disrupting the user. In that case we disable the
- * interval and show a one-time notification.
- */
-async function scheduleAutoPush() {
+function scheduleAutoPush() {
     const settings = getSettings();
     if (autoPushIntervalId !== null) {
         clearInterval(autoPushIntervalId);
@@ -571,16 +369,8 @@ async function scheduleAutoPush() {
         return;
     }
 
-    // On mobile with an old App (< v2.3.0), the job-based fallback triggers a
-    // system file picker on every interval tick, disrupting the user. Disable
-    // the interval and show a one-time notification in that case.
-    if ((isAndroidRuntime() || isIosRuntime()) && !(await apiSupportsUserBackup())) {
-        showOldAppMobileNoticeOnce();
-        return;
-    }
-
     autoPushIntervalId = setInterval(() => {
-        if (isAutoSyncBusy()) {
+        if (autoPushPending) {
             autoSyncDirty = true;
             return;
         }
@@ -588,24 +378,12 @@ async function scheduleAutoPush() {
     }, (Number(settings.syncIntervalMinutes) || DEFAULT_SYNC_INTERVAL_MINUTES) * 60 * 1000);
 }
 
-function showOldAppMobileNoticeOnce() {
-    if (sessionStorage.getItem(OLD_APP_VERSION_NOTICE_KEY)) {
-        return;
-    }
-    sessionStorage.setItem(OLD_APP_VERSION_NOTICE_KEY, '1');
-    toastr.warning(
-        localize('webdav_sync.old_app_mobile_unsupported', 'Auto-push is unavailable on mobile with this App version. Please upgrade to TauriTavern v2.3.0+ or use manual push on desktop.'),
-        localize('webdav_sync.push_title', 'Push to WebDAV')
-    );
-    setStatusText(localize('webdav_sync.old_app_mobile_unsupported', 'Auto-push unavailable on mobile (App < v2.3.0)'));
-}
-
 function onEventDebounced() {
     const settings = getSettings();
     if (!settings.autoPushEnabled) {
         return;
     }
-    if (isAutoSyncBusy()) {
+    if (autoPushPending) {
         autoSyncDirty = true;
         return;
     }
@@ -614,12 +392,12 @@ function onEventDebounced() {
     }
     autoPushDebounceId = setTimeout(() => {
         autoPushDebounceId = null;
-        if (isAutoSyncBusy()) {
+        if (autoPushPending) {
             autoSyncDirty = true;
             return;
         }
         runAutoPushOnce();
-    }, AUTO_PUSH_DEBOUNCE_MS);
+    }, 5000);
 }
 
 function onSaveClick() {
@@ -646,7 +424,6 @@ function onSaveClick() {
 
 jQuery(async () => {
     const html = await renderExtensionTemplateAsync(MODULE_NAME, 'settings');
-    // Insert before the TauriTavern version panel so it appears above it.
     $(html).insertBefore('#tauritavern_version_container');
 
     const settings = getSettings();
@@ -668,7 +445,6 @@ jQuery(async () => {
     $('#webdav_sync_save_button').on('click', onSaveClick);
     $('#webdav_sync_push_button').on('click', runPush);
     $('#webdav_sync_pull_button').on('click', runPull);
-    $('#webdav_sync_cancel_button').on('click', requestCancelActiveJob);
 
     eventSource.on(event_types.GENERATION_ENDED, onEventDebounced);
     eventSource.on(event_types.MESSAGE_UPDATED, onEventDebounced);
@@ -700,10 +476,10 @@ jQuery(async () => {
     eventSource.on(event_types.SECRET_ROTATED, onEventDebounced);
     eventSource.on(event_types.SETTINGS_UPDATED, onEventDebounced);
 
-    await scheduleAutoPush();
+    scheduleAutoPush();
 
     if (settings.autoPushEnabled && settings.url) {
-        if (isAutoSyncBusy()) {
+        if (autoPushPending) {
             autoSyncDirty = true;
             setStatusText(localize('webdav_sync.auto_push_running', 'Auto-push is currently running'));
         } else {

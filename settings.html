@@ -81,23 +81,16 @@
                     <i class="fa-solid fa-cloud-arrow-down"></i>
                     <span data-i18n="webdav_sync.pull_button">Pull from WebDAV</span>
                 </button>
-                <button id="webdav_sync_cancel_button" class="menu_button menu_button_icon"
-                    style="display:none;">
-                    <i class="fa-solid fa-ban"></i>
-                    <span data-i18n="webdav_sync.cancel_button">Cancel Job</span>
-                </button>
             </div>
 
             <small id="webdav_sync_status" class="extensions_info"></small>
 
             <small class="extensions_info" data-i18n="webdav_sync.push_hint">
-                Push exports your data to a zip archive and uploads it directly to the WebDAV server. No local file is kept.
+                Push exports your data to a zip archive and uploads it directly to the WebDAV server. Requires TauriTavern v2.3.0+.
             </small>
             <small class="extensions_info" data-i18n="webdav_sync.warning_merge">
                 Warning: pulling will merge into your current local data directory (same-path files will be overwritten).
             </small>
-            <!-- Hidden file picker for job-based fallback (App < v2.3.0 on desktop) -->
-            <input id="webdav_sync_file_input" type="file" accept=".zip" style="display:none" />
         </div>
     </div>
 </div>
