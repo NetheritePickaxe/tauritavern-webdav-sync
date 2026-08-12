@@ -37,6 +37,12 @@ let autoPushDebounceId = null;
 let autoPushIntervalId = null;
 let autoSyncDirty = false;
 
+// Capability probe result, cached after first check.
+// true  = /api/users/backup is supported (App >= v2.3.0)
+// false = not supported (App < v2.3.0), use job-based fallback
+// undefined = not yet probed
+let _apiSupportsUserBackup = /** @type {boolean|null|undefined} */ (undefined);
+
 function isAutoSyncBusy() {
     return autoPushPending || hasActiveJob();
 }
@@ -336,10 +342,6 @@ async function exportViaNewApi() {
 }
 
 async function exportViaJobFallback() {
-    if (isAndroidRuntime() || isIosRuntime()) {
-        return null;
-    }
-
     const jobId = await startExportJob();
     const finalStatus = await pollUntilTerminal(jobId);
     if (finalStatus.state !== 'completed') {
@@ -575,8 +577,10 @@ async function scheduleAutoPush() {
         return;
     }
 
-    // On mobile, auto-push is unsupported — show one-time notice.
-    if (isAndroidRuntime() || isIosRuntime()) {
+    // On mobile with an old App (< v2.3.0), the job-based fallback triggers a
+    // system file picker on every interval tick, disrupting the user. Disable
+    // the interval and show a one-time notification in that case.
+    if ((isAndroidRuntime() || isIosRuntime()) && !(await apiSupportsUserBackup())) {
         showOldAppMobileNoticeOnce();
         return;
     }
