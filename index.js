@@ -37,12 +37,6 @@ let autoPushDebounceId = null;
 let autoPushIntervalId = null;
 let autoSyncDirty = false;
 
-// Capability probe result, cached after first check.
-// true  = /api/users/backup is supported (App >= v2.3.0)
-// false = not supported (App < v2.3.0), use job-based fallback
-// undefined = not yet probed
-let _apiSupportsUserBackup = /** @type {boolean|null|undefined} */ (undefined);
-
 function isAutoSyncBusy() {
     return autoPushPending || hasActiveJob();
 }
@@ -135,23 +129,6 @@ function stopJobTracking() {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Probes whether the host App supports the /api/users/backup endpoint.
- * Result is cached in _apiSupportsUserBackup so subsequent calls are O(1).
- */
-async function apiSupportsUserBackup() {
-    if (_apiSupportsUserBackup !== undefined) {
-        return _apiSupportsUserBackup;
-    }
-    try {
-        const r = await fetch('/api/users/backup', { method: 'HEAD' });
-        _apiSupportsUserBackup = r.status !== 404 && r.status !== 501;
-    } catch {
-        _apiSupportsUserBackup = false;
-    }
-    return _apiSupportsUserBackup;
 }
 
 function basicAuthHeader(username, password) {
@@ -328,11 +305,21 @@ async function requestCancelActiveJob() {
  *   a system file picker during the /save step.
  */
 async function exportUserBackupArchive() {
-    const supportsNewApi = await apiSupportsUserBackup();
-    if (supportsNewApi) {
-        return exportViaNewApi();
+    try {
+        return await exportViaNewApi();
+    } catch (error) {
+        const msg = normalizeCaughtError(error);
+        // If the new endpoint is unavailable (404, 501, network failure), fall back
+        // to the job-based export that works on older App versions.
+        if (msg.includes('Failed to fetch') ||
+            msg.includes('Not Found') ||
+            msg.includes('Not allowed') ||
+            msg.includes('404') ||
+            msg.includes('501')) {
+            return exportViaJobFallback();
+        }
+        throw error;
     }
-    return exportViaJobFallback();
 }
 
 async function exportViaNewApi() {
@@ -588,13 +575,10 @@ async function scheduleAutoPush() {
         return;
     }
 
-    // On mobile with an old App, auto-push is unsupported — show one-time notice.
+    // On mobile, auto-push is unsupported — show one-time notice.
     if (isAndroidRuntime() || isIosRuntime()) {
-        const supportsNewApi = await apiSupportsUserBackup();
-        if (!supportsNewApi) {
-            showOldAppMobileNoticeOnce();
-            return;
-        }
+        showOldAppMobileNoticeOnce();
+        return;
     }
 
     autoPushIntervalId = setInterval(() => {
@@ -664,7 +648,8 @@ function onSaveClick() {
 
 jQuery(async () => {
     const html = await renderExtensionTemplateAsync(MODULE_NAME, 'settings');
-    $('#extensions_settings2').append(html);
+    // Insert before the TauriTavern version panel so it appears above it.
+    $(html).insertBefore('#tauritavern_version_container');
 
     const settings = getSettings();
     $('#webdav_sync_url_input').val(settings.url || '');
